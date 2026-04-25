@@ -4,7 +4,7 @@
 > ResNet18 analyses the frequency domain. Wav2Vec2 analyses the temporal domain.  
 > When they disagree, that disagreement is itself a signal.
 
-**[Live Demo](#)** 
+**[Live Demo](https://huggingface.co/spaces/rudranshiverma/audioinsight-deepfake-audio-detection)** 
 
 ---
 
