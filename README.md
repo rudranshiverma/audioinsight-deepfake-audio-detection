@@ -303,5 +303,5 @@ Upload an audio file and receive predictions from both models.
 
 ## Author
 
-Built by **Rudransh Verma**. 
+Built by **Rudranshi Verma**. 
 [LinkedIn](https://www.linkedin.com/in/rudranshi-verma/)
