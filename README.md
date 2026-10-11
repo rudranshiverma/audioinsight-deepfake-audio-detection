@@ -2,11 +2,8 @@
 
 Two complementary detectors for synthetic speech, a spectrogram CNN and a self-supervised speech transformer, evaluated on the ASVspoof 2019 Logical Access benchmark and served through an interpretable web app.
 
-[![Live Demo](https://img.shields.io/badge/Live%20Demo-Hugging%20Face%20Spaces-ffcc4d?logo=huggingface&logoColor=black)](https://huggingface.co/spaces/rudranshiverma/audioinsight-deepfake-audio-detection)
-![Python](https://img.shields.io/badge/Python-ML%20pipeline-3776ab?logo=python&logoColor=white)
-![PyTorch](https://img.shields.io/badge/PyTorch-models-ee4c2c?logo=pytorch&logoColor=white)
-![FastAPI](https://img.shields.io/badge/FastAPI-backend-009688?logo=fastapi&logoColor=white)
-![React](https://img.shields.io/badge/React-frontend-61dafb?logo=react&logoColor=black)
+> **[Try the live demo on Hugging Face Spaces](https://huggingface.co/spaces/rudranshiverma/audioinsight-deepfake-audio-detection)**
+
 
 <p align="center">
   <img src="screenshots/homepage.png" width="900" alt="AudioInsight homepage">
