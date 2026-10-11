@@ -1,242 +1,234 @@
-# AudioInsight — Deepfake Audio Detection
+# AudioInsight: Deepfake Audio Detection
 
-> Dual-model deepfake audio detection with interpretable predictions.  
-> ResNet18 analyses the frequency domain. Wav2Vec2 analyses the temporal domain.  
-> When they disagree, that disagreement is itself a signal.
+Two complementary detectors for synthetic speech, a spectrogram CNN and a self-supervised speech transformer, evaluated on the ASVspoof 2019 Logical Access benchmark and served through an interpretable web app.
 
-**[Live Demo](https://huggingface.co/spaces/rudranshiverma/audioinsight-deepfake-audio-detection)** 
+[![Live Demo](https://img.shields.io/badge/Live%20Demo-Hugging%20Face%20Spaces-ffcc4d?logo=huggingface&logoColor=black)](https://huggingface.co/spaces/rudranshiverma/audioinsight-deepfake-audio-detection)
+![Python](https://img.shields.io/badge/Python-3776ab?logo=python&logoColor=white)
+![PyTorch](https://img.shields.io/badge/PyTorch-ee4c2c?logo=pytorch&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-backend-009688?logo=fastapi&logoColor=white)
+![React](https://img.shields.io/badge/React-frontend-61dafb?logo=react&logoColor=black)
 
----
+<p align="center">
+  <img src="screenshots/homepage.png" width="900" alt="AudioInsight homepage">
+</p>
 
-## What This Is
+## Overview
 
-AudioInsight detects AI-generated speech by running two independently trained models on the same audio clip and comparing their findings. The system is designed around a core insight: **a CNN looking at spectrograms and a transformer listening to raw waveforms make different kinds of mistakes.** Combining them with explainability outputs makes the system more trustworthy than either model alone.
+AudioInsight takes a speech clip and decides whether it is bona fide (human) or spoofed (synthesised or voice-converted). Two models examine the same clip in different ways:
 
-The project was built on top of the [ASVspoof 2019 LA benchmark dataset](https://www.asvspoof.org/), the standard evaluation benchmark for anti-spoofing research, and finetuned on modern neural TTS samples from ElevenLabs and Respeecher to improve real-world robustness.
+- **ResNet18** reads a log-mel spectrogram and learns the spectral artefacts that vocoders leave behind.
+- **wav2vec 2.0** reads the raw waveform through a speech model pre-trained on 960 hours of LibriSpeech, and learns how real speech is structured over time.
 
----
+Each prediction comes with an explanation: a Grad-CAM heatmap over the spectrogram for ResNet18, and frame-level attention weights for wav2vec 2.0.
 
 ## Results
 
-Both models were evaluated on the ASVspoof 2019 LA eval set (71,933 samples).
+Every model is trained on the ASVspoof 2019 LA train split, has its checkpoint and decision threshold chosen on the dev split, and is scored once on the **eval split: 71,237 utterances, 13 attacks (A07–A19)**. Eleven of the 13 eval attacks never appear in training; A16 and A19 reuse the algorithms of A04 and A06.
 
-| Model | EER ↓ | Recall ↑ | PR-AUC ↑ | Missed Detections ↓ |
+| System | EER (95% CI) | min t-DCF | ROC-AUC | AP (bona fide) |
 |---|---|---|---|---|
-| ResNet18 | **0.0455** | **0.9001** | 0.9990 | 6,380 |
-| Wav2Vec2 | **0.0408** | **0.9001** | 0.9983 | 6,385 |
+| ResNet18 | 6.31% (6.00–6.59) | 0.1821 | 0.9834 | 0.9014 |
+| wav2vec 2.0 | **1.06%** (0.91–1.22) | 0.0350 | 0.9986 | 0.9718 |
+| Fusion | 1.12% (1.01–1.24) | **0.0314** | **0.9989** | **0.9905** |
 
-**Training data for both models:** ASVspoof 2019 LA (25,380 samples) + 600 modern TTS samples (ElevenLabs, Respeecher) + 1,000 LibriSpeech samples + noise augmentation.
+EER and min t-DCF are computed with the official ASVspoof 2019 evaluation code, and min t-DCF uses the organisers' ASV scores. The confidence intervals come from 1,000 stratified bootstrap resamples of the eval set. The fusion is a logistic regression on the two standardised scores, fitted on dev only. It does not improve EER over wav2vec 2.0 alone, but lowers min t-DCF by about 10%.
 
-Both models use ResNet18 (ImageNet-pretrained, partially frozen) and Wav2Vec2-base (HuggingFace, layers 10–11 unfrozen) as their respective backbones, with custom classification heads trained for binary spoof detection.
+<p align="center">
+  <img src="results/figures/roc_det.png" width="900" alt="ROC and DET curves on eval">
+</p>
 
----
+**At the decision threshold fixed on dev** (spoof is the positive class):
 
-## Architecture
+| System | Accuracy | Precision | Recall | F1 | FPR | FNR |
+|---|---|---|---|---|---|---|
+| ResNet18 | 81.40% | 99.83% | 79.39% | 88.45% | 1.14% | 20.61% |
+| wav2vec 2.0 | 95.90% | 99.97% | 95.46% | 97.66% | 0.26% | 4.54% |
+| Fusion | 95.80% | 99.98% | 95.34% | 97.61% | 0.20% | 4.66% |
 
+Spoofed clips make up 90% of eval, so accuracy and precision look high for any model that leans towards "spoof". EER is the main metric.
+
+### Context
+
+Published results on the same eval set, as reported by their authors:
+
+| System | EER | min t-DCF |
+|---|---|---|
+| CQCC-GMM (official baseline B1) | 9.57% | 0.2366 |
+| LFCC-GMM (official baseline B2) | 8.09% | 0.2116 |
+| RawNet2 | 1.12% | 0.0330 |
+| AASIST | 0.83% | 0.0275 |
+| **AudioInsight ResNet18** | **6.31%** | **0.1821** |
+| **AudioInsight wav2vec 2.0** | **1.06%** | **0.0350** |
+
+### Per-attack performance
+
+<p align="center">
+  <img src="results/figures/per_attack_eer.png" width="900" alt="Eval EER per attack">
+</p>
+
+wav2vec 2.0 stays below 3% EER on every attack, and its hardest attack is A10 (2.83%). ResNet18 holds below 4% on A07–A16 but rises to 11–13% on A17–A19. Most of the gap between the two models comes from those three attacks.
+
+### Where the models disagree
+
+| Eval trials | Count | ResNet18 error | wav2vec 2.0 error | Fusion error |
+|---|---|---|---|---|
+| Models agree | 58,558 | 2.98% | 2.98% | 2.79% |
+| Models disagree | 12,679 | 90.73% | 9.27% | 10.71% |
+
+The models disagree on 17.8% of eval trials, and in those cases wav2vec 2.0 is right about 9 times out of 10. When they agree, both are wrong on only 2.98% of trials.
+
+<details>
+<summary><b>Score distributions and confusion matrices</b></summary>
+<br>
+<p align="center">
+  <img src="results/figures/score_distributions.png" width="900" alt="Score distributions on eval">
+</p>
+<p align="center">
+  <img src="results/figures/confusion_matrices.png" width="900" alt="Confusion matrices on eval">
+</p>
+</details>
+
+## How It Works
+
+```mermaid
+flowchart LR
+    A[Audio clip] --> B[16 kHz mono<br/>first 4 s, zero-padded]
+    B --> C[Log-mel + Δ + ΔΔ<br/>3 × 128 × T]
+    B --> D[Raw waveform<br/>per-clip normalised]
+    C --> E[ResNet18]
+    D --> F[wav2vec 2.0 base<br/>layer-weighted sum<br/>attention pooling]
+    E --> G[Spoof score<br/>+ Grad-CAM]
+    F --> H[Spoof score<br/>+ attention weights]
 ```
-Audio Input (any format, any SR)
-         │
-         ▼
-   Preprocessing
-   ┌─────────────────────────────────────┐
-   │  mono → 16kHz → trim/pad to 4s     │
-   └──────────────┬──────────────────────┘
-                  │
-        ┌─────────┴──────────┐
-        ▼                    ▼
-  ResNet18 path         Wav2Vec2 path
-  ┌─────────────┐       ┌─────────────┐
-  │ Mel spectrogram     │ Raw waveform│
-  │ + Δ + ΔΔ    │       │ [64000]     │
-  │ [3, 128, T] │       │             │
-  │             │       │ Per-sample  │
-  │ ResNet18    │       │ z-norm      │
-  │ (ImageNet   │       │             │
-  │  pretrained)│       │ Wav2Vec2-   │
-  │             │       │ base +      │
-  │ Frozen:     │       │ attention   │
-  │ stem, layer1│       │ pooling     │
-  │             │       │             │
-  │ Trained:    │       │ Frozen:     │
-  │ layer2-4,fc │       │ layers 0-9  │
-  │             │       │ Trained:    │
-  │ FocalLoss   │       │ layers 10-11│
-  │ α=0.75 γ=2  │       │ + head      │
-  └──────┬──────┘       └──────┬──────┘
-         │                     │
-         ▼                     ▼
-   P(AI) score           P(AI) score
-   + GradCAM             + Attention
-     heatmap               weights
-         │                     │
-         └──────────┬──────────┘
-                    ▼
-             Interpretation
-             (confidence +
-              agreement +
-              divergence
-              analysis)
-```
 
----
+| | ResNet18 | wav2vec 2.0 |
+|---|---|---|
+| Input | 128-band log-mel spectrogram with Δ and ΔΔ, normalised with train-set statistics | Raw waveform, zero mean and unit variance per clip |
+| Backbone | ImageNet-pretrained ResNet18 with stem and `layer1` frozen | `facebook/wav2vec2-base`; all 12 transformer layers fine-tuned, CNN feature encoder frozen |
+| Pooling and head | Global average pooling → BatchNorm → Dropout → Linear | Learned weighted sum of all hidden layers → attention pooling → MLP |
+| Trainable parameters | 11.0 M of 11.2 M | 90.5 M of 94.7 M |
+| Augmentation | RawBoost + SpecAugment | RawBoost |
+| Optimisation | AdamW, lr 1e-4, batch 64 | AdamW, lr 1e-5 encoder / 1e-4 head, warm-up + cosine decay, batch 14 |
+| Best epoch (dev EER) | 7 (2.56%) | 6 (0.12%) |
 
-## Why Two Models
+Both models use the same training setup:
 
-The two models look at completely different representations of the same audio.
+- **Augmentation:** RawBoost with the official LA configuration (convolutive followed by impulsive signal-dependent noise).
+- **Loss:** binary cross-entropy weighted 0.9 / 0.1 towards the bona fide minority class.
+- **Mixed precision** throughout.
+- **Early stopping and checkpointing** on dev EER.
 
-**ResNet18** converts audio into a mel spectrogram — a 2D image of frequency content over time. Neural vocoders (the synthesis engine behind most TTS systems) tend to leave characteristic artefacts in specific frequency bands. A CNN trained on spectrograms learns to recognise these frequency-domain fingerprints.
-
-**Wav2Vec2** processes raw waveforms directly. It was pre-trained by Meta on 960 hours of LibriSpeech to learn general speech representations, then finetuned for binary classification. It captures temporal patterns — how phonemes transition, how prosody unfolds — that are harder to fake convincingly than spectral properties.
-
-**The disagreement case is the most interesting one.** When ResNet18 says AI but Wav2Vec2 says Human, the most likely explanation is a high-quality TTS that preserves natural prosody (fooling the temporal model) but still leaves spectral traces (caught by the CNN). This asymmetric failure mode is itself diagnostic.
-
----
+Each model's decision threshold is the dev-EER threshold stored in its checkpoint.
 
 ## Explainability
 
-### Grad-CAM (ResNet18)
-Gradient-weighted Class Activation Mapping highlights which regions of the mel spectrogram contributed most to the prediction. High activation in specific frequency bands at specific time positions indicates where the model found suspicious patterns.
+**Grad-CAM (ResNet18).** Gradient-weighted class activation mapping shows which time-frequency regions of the spectrogram drove the score.
 
-### Attention Weights (Wav2Vec2)
-The model uses soft attention pooling over the sequence of hidden states. The per-frame attention weights show which 20ms segments of the audio the model weighted most heavily when making its decision. Spikes in attention over silence or transitions often indicate where temporal inconsistencies were detected.
+**Attention weights (wav2vec 2.0).** The pooling layer gives each ~20 ms frame a weight, and the weights show which parts of the clip the model relied on.
 
----
+<p align="center">
+  <img src="screenshots/prediction.png" width="900" alt="Model predictions with Grad-CAM and attention">
+</p>
+<p align="center">
+  <img src="screenshots/interpretation.png" width="900" alt="Interpretation panel">
+</p>
 
 ## Dataset
 
-**Training:** ASVspoof 2019 Logical Access (LA) track
-- 25,380 training samples (2,580 bonafide / 22,800 spoof)
-- 19 different TTS/VC attack algorithms (A01–A19)
-- Covers vocoder-based, waveform concatenation, and neural TTS attacks
+[ASVspoof 2019 Logical Access](https://datashare.ed.ac.uk/handle/10283/3336), English speech from the VCTK corpus:
 
-**Finetuning data (additional):**
-- 600 modern TTS samples — ElevenLabs and Respeecher (labelled spoof)
-- 1,000 LibriSpeech samples (labelled bonafide)
-- 2,000 real-world noise files for augmentation
+| Split | Bona fide | Spoof | Attacks | Use |
+|---|---|---|---|---|
+| Train | 2,580 | 22,800 | A01–A06 | Training |
+| Dev | 2,548 | 22,296 | A01–A06 | Checkpoint, threshold and fusion selection |
+| Eval | 7,355 | 63,882 | A07–A19 | Final scoring only |
 
-**Evaluation:** ASVspoof 2019 LA eval set — 71,933 samples across 13 attack types
+## Training Pipeline
 
----
+The notebooks in `notebooks/` run in order on Kaggle (2 × NVIDIA T4). Each notebook writes the files the next one reads.
 
-## Tech Stack
+| Notebook | Purpose | Runtime |
+|---|---|---|
+| `00_data_prep` | Verifies every FLAC against its embedded MD5, checks protocol counts and speaker disjointness, builds an int16 audio cache and train-set feature statistics | CPU |
+| `01_resnet18` | Trains ResNet18; 12 epochs at ~7 min | GPU, ~1.4 h |
+| `02_wav2vec2` | Fine-tunes wav2vec 2.0; 9 epochs at ~15.5 min | GPU, ~2.3 h |
+| `03_score_dump` | Scores dev and eval from the original FLAC files; saves per-utterance scores, embeddings and attention | GPU, ~15 min |
+| `04_evaluate` | Fusion, all metrics, bootstrap intervals and figures | CPU |
 
-| Layer | Technology |
-|---|---|
-| ML Framework | PyTorch 2.x |
-| Pretrained Models | torchvision ResNet18 (ImageNet), facebook/wav2vec2-base (HuggingFace) |
-| Audio Processing | torchaudio, librosa |
-| Backend | FastAPI, Python 3.11 |
-| Frontend | React 19, TypeScript, Tailwind CSS |
-| Visualisation | HTML Canvas (custom jet colormap, attention bar chart) |
-| Training Platform | Kaggle (NVIDIA Tesla T4) |
+Built-in safeguards:
 
----
+- **Before training:** each training notebook confirms its model can fit a small fixed batch before the full run.
+- **After training:** every checkpoint is reloaded and must reproduce its recorded dev EER.
+- **Before reporting:** notebook 03 re-scores dev from the original audio, and every EER is cross-checked against an independent implementation.
+
+The per-utterance scores in `results/scores/` are enough to recompute every number above without a GPU.
 
 ## Project Structure
 
 ```
 audioinsight/
-├── backend/
-│   ├── main.py           # FastAPI app, /health + /analyze endpoints
-│   ├── inference.py      # Model architectures + checkpoint loading
-│   ├── preprocess.py     # Audio loading, mel features, waveform pipeline
-│   ├── xai.py            # GradCAM + attention weight extraction
-│   ├── schemas.py        # Pydantic response models
-│   ├── config.py         # Constants (SR, N_FFT, paths, thresholds)
-│   ├── requirements.txt
-│   └── models/           # Place .pth checkpoints here
-│
-├── frontend/
-│   └── src/
-│       ├── App.tsx
-│       └── components/
-│           ├── Navbar.tsx
-│           ├── Hero.tsx
-│           ├── UploadCard.tsx
-│           ├── ModelPanel.tsx      # GradCAM + attention visualisation
-│           ├── Interpretation.tsx  # Confidence-aware interpretation
-│           └── Footer.tsx
-│
-└── notebooks/
-    ├── 01_resnet18_training.ipynb | ResNet18 baseline — mel spectrogram preprocessing and initial training on ASVspoof 2019 LA
-    ├── 02_resnet18_finetuning.ipynb | ResNet18 finetuning on ElevenLabs/Respeecher TTS + LibriSpeech with FocalLoss and WeightedRandomSampler
-    ├── 03_wav2vec2_training.ipynb | Wav2Vec2 base training with attention pooling head, BCEWithLogitsLoss pos_weight=8.84
-    └── 04_wav2vec2_finetuning.ipynb | Wav2Vec2 finetuning on modern TTS data with source-aware WeightedRandomSampler
-
+├── notebooks/
+│   ├── 00_data_prep.ipynb
+│   ├── 01_resnet18.ipynb
+│   ├── 02_wav2vec2.ipynb
+│   ├── 03_score_dump.ipynb
+│   └── 04_evaluate.ipynb
+├── src/
+│   ├── audio_utils.py        # Protocols, audio I/O, features, official metrics
+│   └── rawboost.py           # RawBoost augmentation
+├── results/
+│   ├── metrics_summary.csv   # All metrics, dev and eval
+│   ├── per_attack_eer.csv
+│   ├── agreement.csv
+│   ├── fusion.json           # Dev-fitted fusion parameters
+│   ├── metrics.json
+│   ├── figures/
+│   └── scores/               # Per-utterance dev and eval scores
+├── backend/                  # FastAPI inference service
+├── frontend/                 # React + TypeScript interface
+├── screenshots/
+└── THIRD_PARTY_LICENSES.md
 ```
 
 ## Running Locally
 
-### Prerequisites
-- Python 3.10+
-- Node.js 18+
-- Model checkpoints (see below)
+**Prerequisites:** Python 3.10+, Node.js 18+.
 
 ### Backend
 
 ```bash
 cd backend
 pip install -r requirements.txt
-```
-
-Models are downloaded automatically from HuggingFace on first startup and automatically saved in:
-```
-backend/models/
-├── resnet18_finetuned.pth
-└── w2v_finetuned.pth
-```
-
-```bash
 uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-Visit `http://localhost:8000/health` to verify both models loaded.
+Model checkpoints are downloaded from Hugging Face on first startup into `backend/models/`. Open `http://localhost:8000/health` to confirm both models loaded.
 
 ### Frontend
 
 ```bash
 cd frontend
 npm install
-```
-
-Create a `.env.local` file:
-```
-VITE_API_URL=http://localhost:8000
-```
-
-```bash
+echo "VITE_API_URL=http://localhost:8000" > .env.local
 npm run dev
 ```
 
-### Supported Audio Formats
-WAV, MP3, FLAC, OGG, M4A — any sample rate, mono or stereo. Audio is automatically resampled to 16kHz and trimmed/padded to 4 seconds.
-
----
+Supported formats are WAV, MP3, FLAC, OGG and M4A, at any sample rate, mono or stereo.
 
 ## API
 
 ### `POST /analyze`
 
-Upload an audio file and receive predictions from both models.
+Request: `multipart/form-data` with an audio file in the field `file`.
 
-**Request:** `multipart/form-data`, field name `file`
-
-**Response:**
 ```json
 {
   "resnet_prediction": "AI",
   "resnet_score": 0.9823,
   "w2v_prediction": "Human",
   "w2v_score": 0.1204,
-  "gradcam": {
-    "values": [...],
-    "rows": 128,
-    "cols": 250
-  },
-  "attention": {
-    "values": [...],
-    "num_frames": 199
-  },
+  "gradcam": { "values": [], "rows": 128, "cols": 250 },
+  "attention": { "values": [], "num_frames": 199 },
   "interpretation": null,
   "duration_seconds": 4.0,
   "original_sr": 44100
@@ -244,64 +236,44 @@ Upload an audio file and receive predictions from both models.
 ```
 
 ### `GET /health`
+
 ```json
-{
-  "status": "ok",
-  "device": "cuda",
-  "resnet_loaded": true,
-  "w2v_loaded": true
-}
+{ "status": "ok", "device": "cuda", "resnet_loaded": true, "w2v_loaded": true }
 ```
 
----
+## Limitations
 
-## Screenshots
+- **Language:** ASVspoof 2019 LA is English-only, so performance on other languages is not established.
+- **Generators:** the training attacks are 2019-era TTS and voice conversion systems. Current commercial voice cloning is not represented.
+- **Clip length:** only the first 4 seconds of a clip are analysed.
+- **Threshold shift:** thresholds set on dev transfer imperfectly to unseen attacks. wav2vec 2.0 misses 0.12% of spoofs on dev and 4.54% on eval at the same threshold, so a deployment would need calibration on data that resembles its own traffic.
 
-### Homepage
-![Homepage](screenshots/homepage.png)
+## Metrics
 
-### Result
-<p align="center">
-  <img src="screenshots/prediction.png" width="900">
-</p>
-
-### Interpretation
-<p align="center">
-  <img src="screenshots/interpretation.png" width="900">
-</p>
-
-
-## Known Limitations
-
-**Language coverage:** Both models were trained primarily on English speech (ASVspoof 2019 LA is English-only). Performance on non-English TTS is reduced, particularly for Wav2Vec2 which relies on learned speech representations that are language-sensitive.
-
-**Modern neural TTS:** Systems like ElevenLabs v2, OpenAI TTS, and similar post-2023 models are significantly harder to detect. Finetuning on 600 ElevenLabs samples improved robustness but doesn't fully close the gap on the latest generation of synthesis systems.
-
-**Audio length:** The system analyses the first 4 seconds. For longer clips, a sliding window approach would improve reliability.
-
-**Threshold sensitivity:** Both models use a fixed decision threshold (0.5). In high-stakes deployments, threshold calibration per use-case would be necessary.
-
----
-
-## Metrics Explained
-
-**EER (Equal Error Rate):** The threshold at which false acceptance rate equals false rejection rate. Lower is better. An EER of 0.047 means approximately 4.7% error rate at the optimal operating point.
-
-**PR-AUC (Area Under Precision-Recall Curve):** Measures detection quality across all thresholds, weighted toward performance on the positive (spoof) class. More informative than ROC-AUC under class imbalance. Values above 0.99 indicate near-perfect ranking.
-
-**Recall:** Fraction of actual spoof samples correctly identified. Prioritised over precision because missed detections (false negatives) are more costly than false alarms in anti-spoofing.
-
----
+| Metric | Meaning |
+|---|---|
+| **EER** | The error rate at the threshold where real speech wrongly rejected equals spoofs wrongly accepted. It needs no threshold choice, which makes it the standard comparison metric in anti-spoofing. Lower is better. |
+| **min t-DCF** | The ASVspoof cost of placing the detector in front of a speaker-verification system, at its best threshold. Lower is better. |
+| **ROC-AUC** | The probability that a random spoof scores higher than a random bona fide clip. |
+| **AP (bona fide)** | Average precision with bona fide, the minority class, as the positive class; more sensitive to class imbalance than ROC-AUC. |
+| **FPR / FNR** | Bona fide flagged as spoof, and spoof missed, at the dev-fixed threshold. |
 
 ## References
 
-- ASVspoof 2019: [ASVspoof 2019: A large-scale public database of synthesized and converted speech](https://arxiv.org/abs/1911.01601)
-- Wav2Vec2: [wav2vec 2.0: A Framework for Self-Supervised Learning of Speech Representations](https://arxiv.org/abs/2006.11477)
-- Grad-CAM: [Grad-CAM: Visual Explanations from Deep Networks via Gradient-based Localization](https://arxiv.org/abs/1610.02391)
+- Wang et al., [ASVspoof 2019: A large-scale public database of synthesized, converted and replayed speech](https://arxiv.org/abs/1911.01601), Computer Speech & Language, 2020
+- Kinnunen et al., [t-DCF: a detection cost function for the tandem assessment of spoofing countermeasures and automatic speaker verification](https://arxiv.org/abs/1804.09618), Odyssey 2018
+- Baevski et al., [wav2vec 2.0: A framework for self-supervised learning of speech representations](https://arxiv.org/abs/2006.11477), NeurIPS 2020
+- Tak et al., [Automatic speaker verification spoofing and deepfake detection using wav2vec 2.0 and data augmentation](https://arxiv.org/abs/2202.12233), Odyssey 2022
+- Tak et al., [RawBoost: A raw data boosting and augmentation method applied to automatic speaker verification anti-spoofing](https://arxiv.org/abs/2111.04433), ICASSP 2022
+- Tak et al., [End-to-end anti-spoofing with RawNet2](https://arxiv.org/abs/2011.01108), ICASSP 2021
+- Jung et al., [AASIST: Audio anti-spoofing using integrated spectro-temporal graph attention networks](https://arxiv.org/abs/2110.01200), ICASSP 2022
+- He et al., [Deep residual learning for image recognition](https://arxiv.org/abs/1512.03385), CVPR 2016
+- Selvaraju et al., [Grad-CAM: Visual explanations from deep networks via gradient-based localization](https://arxiv.org/abs/1610.02391), ICCV 2017
 
----
+## License
+
+Third-party code is used under its own license; see [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md). The ASVspoof 2019 evaluation code is CC BY-NC-SA 4.0, and RawBoost is MIT.
 
 ## Author
 
-Built by **Rudranshi Verma**. 
-[LinkedIn](https://www.linkedin.com/in/rudranshi-verma/)
+**Rudranshi Verma** · [LinkedIn](https://www.linkedin.com/in/rudranshi-verma/)
