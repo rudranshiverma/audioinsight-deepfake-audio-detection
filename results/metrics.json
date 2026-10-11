@@ -1,0 +1,194 @@
+{
+  "score_manifest": {
+    "created_utc": "2026-10-11T12:07:54Z",
+    "utils_version": "1.0.1",
+    "utils_sha256": "658e72bce98221b0e1155793a9c2538bba68eb08352708116dfee07e9d82d5cf",
+    "prep_manifest_sha256": "7edc6197ce5f59bf0ab3853d3f3f95dcc466b610535520dbce0b9d2e540a285f",
+    "checkpoints": {
+      "resnet18_seed0": {
+        "file": "notebooks/rudranshiverma/01-resnet18/resnet18_seed0.pt",
+        "sha256": "89beeb29853d571f0e5ab973b914661f8bc8deb7aaa2c481a7f95ae8897c8ffe",
+        "epoch": 7,
+        "dev_eer": 0.02560494057687661,
+        "threshold_logit": 2.4378979206085205
+      },
+      "wav2vec2_seed0": {
+        "file": "notebooks/rudranshiverma/02-wav2vec2/wav2vec2_seed0.pt",
+        "sha256": "58dd55996a0c759c8eb97b64bd0f6ef35b2e41090d97fafdcca9521374576212",
+        "epoch": 6,
+        "dev_eer": 0.001171761244035579,
+        "threshold_logit": 4.28126859664917
+      }
+    },
+    "summary": [
+      {
+        "model": "resnet18",
+        "seed": 0,
+        "split": "dev",
+        "clips": 24844,
+        "eer": 0.025846024010332792,
+        "checkpoint_dev_eer": 0.02560494057687661
+      },
+      {
+        "model": "resnet18",
+        "seed": 0,
+        "split": "eval",
+        "clips": 71237,
+        "eer": 0.0630856994555159,
+        "checkpoint_dev_eer": null
+      },
+      {
+        "model": "wav2vec2",
+        "seed": 0,
+        "split": "dev",
+        "clips": 24844,
+        "eer": 0.001171761244035579,
+        "checkpoint_dev_eer": 0.001171761244035579
+      },
+      {
+        "model": "wav2vec2",
+        "seed": 0,
+        "split": "eval",
+        "clips": 71237,
+        "eer": 0.010601347517626343,
+        "checkpoint_dev_eer": null
+      }
+    ],
+    "versions": {
+      "torch": "2.11.0+cu128",
+      "transformers": "5.16.1"
+    }
+  },
+  "asv_scores_attached": {
+    "dev": false,
+    "eval": false
+  },
+  "summary": [
+    {
+      "system": "ResNet18",
+      "split": "dev",
+      "EER": 0.025846024010332792,
+      "EER CI low": null,
+      "EER CI high": null,
+      "min t-DCF": null,
+      "ROC-AUC": 0.996986193044743,
+      "AP (bona fide)": 0.9841385055279873,
+      "accuracy": 0.974279504105619,
+      "precision": 0.9969709486438111,
+      "recall (TPR)": 0.9743003229278795,
+      "F1": 0.9855052739026879,
+      "FPR": 0.025902668759811617,
+      "FNR": 0.02569967707212056,
+      "TP": 21723,
+      "TN": 2482,
+      "FP": 66,
+      "FN": 573,
+      "threshold": 2.4378979206085205
+    },
+    {
+      "system": "ResNet18",
+      "split": "eval",
+      "EER": 0.0630856994555159,
+      "EER CI low": 0.059956555398889236,
+      "EER CI high": 0.0659378011519412,
+      "min t-DCF": null,
+      "ROC-AUC": 0.9833671471646686,
+      "AP (bona fide)": 0.9013934295459347,
+      "accuracy": 0.8140011510872159,
+      "precision": 0.9983464566929133,
+      "recall (TPR)": 0.793901255439717,
+      "F1": 0.8844631241171239,
+      "FPR": 0.01142080217539089,
+      "FNR": 0.20609874456028301,
+      "TP": 50716,
+      "TN": 7271,
+      "FP": 84,
+      "FN": 13166,
+      "threshold": 2.4378979206085205
+    },
+    {
+      "system": "wav2vec2",
+      "split": "dev",
+      "EER": 0.001171761244035579,
+      "EER CI low": null,
+      "EER CI high": null,
+      "min t-DCF": null,
+      "ROC-AUC": 0.9999937511230377,
+      "AP (bona fide)": 0.9999454722898398,
+      "accuracy": 0.9988327161487683,
+      "precision": 0.9998653077717415,
+      "recall (TPR)": 0.9988338715464657,
+      "F1": 0.9993493235208328,
+      "FPR": 0.0011773940345368916,
+      "FNR": 0.0011661284535342661,
+      "TP": 22270,
+      "TN": 2545,
+      "FP": 3,
+      "FN": 26,
+      "threshold": 4.28126859664917
+    },
+    {
+      "system": "wav2vec2",
+      "split": "eval",
+      "EER": 0.010601347517626343,
+      "EER CI low": 0.009109998463133432,
+      "EER CI high": 0.01223111991558365,
+      "min t-DCF": null,
+      "ROC-AUC": 0.9985728200731078,
+      "AP (bona fide)": 0.9718130997368182,
+      "accuracy": 0.9589960273453402,
+      "precision": 0.999688519483926,
+      "recall (TPR)": 0.9545724930340315,
+      "F1": 0.976609732465307,
+      "FPR": 0.0025832766825288917,
+      "FNR": 0.045427506965968506,
+      "TP": 60980,
+      "TN": 7336,
+      "FP": 19,
+      "FN": 2902,
+      "threshold": 4.28126859664917
+    },
+    {
+      "system": "Fusion",
+      "split": "dev",
+      "EER": 0.0007961245274792869,
+      "EER CI low": null,
+      "EER CI high": null,
+      "min t-DCF": null,
+      "ROC-AUC": 0.9999963386861742,
+      "AP (bona fide)": 0.9999680223838149,
+      "accuracy": 0.999194976654323,
+      "precision": 0.9999102333931777,
+      "recall (TPR)": 0.9991926803013994,
+      "F1": 0.999551328068916,
+      "FPR": 0.0007849293563579278,
+      "FNR": 0.0008073196986006459,
+      "TP": 22278,
+      "TN": 2546,
+      "FP": 2,
+      "FN": 18,
+      "threshold": 0.7512253514880456
+    },
+    {
+      "system": "Fusion",
+      "split": "eval",
+      "EER": 0.011155040891483918,
+      "EER CI low": 0.010063308005576477,
+      "EER CI high": 0.012369543259048044,
+      "min t-DCF": null,
+      "ROC-AUC": 0.9988509618483995,
+      "AP (bona fide)": 0.9905436879705359,
+      "accuracy": 0.9580414672150708,
+      "precision": 0.9997537875679136,
+      "recall (TPR)": 0.9534454149838765,
+      "F1": 0.9760506389968351,
+      "FPR": 0.0020394289598912306,
+      "FNR": 0.04655458501612348,
+      "TP": 60908,
+      "TN": 7340,
+      "FP": 15,
+      "FN": 2974,
+      "threshold": 0.7512253514880456
+    }
+  ]
+}
