@@ -1,176 +1,155 @@
-#inference.py: forward-pass inference for both ResNet18 and Wav2Vec2.
-#architecture definitions are exact copies of the training notebooks so that load_state_dict() works without remapping keys.
-import logging
+import json
+import math
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple
+
 import torch
-import torch.nn as nn
-import torchvision.models as tv_models
-from transformers import Wav2Vec2Model
+from torch import nn
+from torchvision.models import resnet18
+from transformers import Wav2Vec2Config, Wav2Vec2Model
 
-from config import (
-    DEVICE,
-    RESNET_CKPT,
-    W2V_CKPT,
-    WAV2VEC2_BASE,
-    RESNET_DEFAULT_THRESHOLD,
-    W2V_DEFAULT_THRESHOLD,
-)
-logger = logging.getLogger(__name__)
+from config import DEVICE, FUSION_INPUTS
 
-#RESNET18 architecture
-def _build_resnet18() -> nn.Module:
-    #Frozen:  stem, layer1. Trained: layer2, layer3, layer4, fc
-    #FC head: BN(512) -> Dropout(0.3) -> Linear(512, 1)
-    model = tv_models.resnet18(weights=tv_models.ResNet18_Weights.IMAGENET1K_V1)
-    for name, param in model.named_parameters():
-        if "layer2" not in name and "layer3" not in name and "layer4" not in name:
-            param.requires_grad = False
+# isort: split
+import audio_utils as U
 
-    in_feat = model.fc.in_features   # 512
-    model.fc = nn.Sequential(
-        nn.BatchNorm1d(in_feat),
-        nn.Dropout(0.3),
-        nn.Linear(in_feat, 1),
-    )
-    return model
+REQUIRED_KEYS = {
+    "resnet18": ("model_state_dict", "threshold_logit", "threshold_source", "feature_stats", "dev_eer", "epoch"),
+    "wav2vec2": ("model_state_dict", "threshold_logit", "threshold_source", "encoder_config", "dev_eer", "epoch"),
+}
 
-#W2V architecture
-class W2VModel(nn.Module):
-    #Wav2Vec2 with all layers frozen except encoder.layers.10 and encoder.layers.11, soft attention pooling over the time dimension, binary classifier head
-    def __init__(self) -> None:
+
+class FP32Head(nn.Sequential):
+    def forward(self, x):
+        with torch.autocast(x.device.type, enabled=False):
+            return super().forward(x.float())
+
+
+class W2VClassifier(nn.Module):
+    def __init__(self, encoder: Wav2Vec2Model):
         super().__init__()
-        self.encoder = Wav2Vec2Model.from_pretrained(WAV2VEC2_BASE)
-
-        for name, param in self.encoder.named_parameters():
-            if "encoder.layers.10" not in name and "encoder.layers.11" not in name:
-                param.requires_grad = False
-
-        self.attention = nn.Sequential(
-            nn.Linear(768, 128),
-            nn.Tanh(),
-            nn.Linear(128, 1),
-        )
+        self.encoder = encoder
+        dim = encoder.config.hidden_size
+        self.layer_logits = nn.Parameter(torch.zeros(encoder.config.num_hidden_layers + 1))
+        self.attention = nn.Sequential(nn.Linear(dim, 128), nn.Tanh(), nn.Linear(128, 1))
         self.classifier = nn.Sequential(
-            nn.Linear(768, 256),
-            nn.BatchNorm1d(256),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(256, 1),
+            nn.Linear(dim, 256), nn.BatchNorm1d(256), nn.ReLU(), nn.Dropout(0.3), nn.Linear(256, 1)
         )
 
-    def forward(self, wav: torch.Tensor) -> torch.Tensor:
-        #per-sample z-score normalisation
-        wav = (wav - wav.mean(dim=-1, keepdim=True)) / (
-            wav.std(dim=-1, keepdim=True) + 1e-7
-        )
-        hidden = self.encoder(wav).last_hidden_state          # [B, T, 768]
-        attn   = torch.softmax(self.attention(hidden), dim=1) # [B, T, 1]
-        pooled = torch.sum(hidden * attn, dim=1)              # [B, 768]
-        return self.classifier(pooled)                        # [B, 1]
+    def forward(self, wave: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        hidden = self.encoder(wave, output_hidden_states=True).hidden_states
+        with torch.autocast(wave.device.type, enabled=False):
+            stacked = torch.stack([h.float() for h in hidden], dim=0)
+            mixed = (torch.softmax(self.layer_logits, dim=0)[:, None, None, None] * stacked).sum(dim=0)
+            attn = torch.softmax(self.attention(mixed), dim=1)
+            pooled = (attn * mixed).sum(dim=1)
+            return self.classifier(pooled).squeeze(1), attn.squeeze(-1)
 
-    def forward_with_attention(
-        self, wav: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        wav = (wav - wav.mean(dim=-1, keepdim=True)) / (
-            wav.std(dim=-1, keepdim=True) + 1e-7
-        )
-        hidden = self.encoder(wav).last_hidden_state
-        attn   = torch.softmax(self.attention(hidden), dim=1)
-        pooled = torch.sum(hidden * attn, dim=1)
-        logits = self.classifier(pooled)
-        return logits, attn  # [B,1], [B,T,1]
-
-#checkpoint loading helpers
-@dataclass
-class ResNetCheckpoint:
-    model: nn.Module
-    threshold: float
-    mel_mean: float
-    mel_std: float
-    delta_mean: float
-    delta_std: float
-    delta2_mean: float
-    delta2_std: float
 
 @dataclass
-class W2VCheckpoint:
-    model: W2VModel
-    threshold: float
+class LoadedModel:
+    name: str
+    net: nn.Module
+    threshold_logit: float
+    dev_eer: float
+    epoch: int
+    sha256: str
+    features: U.LogMelDelta | None = None
 
-def load_resnet(ckpt_path: str = RESNET_CKPT) -> ResNetCheckpoint:
-    logger.info("Loading ResNet18 checkpoint from %s", ckpt_path)
-    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
 
-    model = _build_resnet18()
-    model.load_state_dict(ckpt["model_state_dict"])
-    model.eval()
-    model.to(DEVICE)
+def _read_checkpoint(path: str, name: str, expected_sha256: str | None) -> tuple[dict, str]:
+    sha = U.file_sha256(path)
+    if expected_sha256 is not None and sha != expected_sha256:
+        raise ValueError(f"{path}: sha256 {sha} does not match the evaluated checkpoint {expected_sha256}")
+    ckpt = torch.load(path, map_location="cpu", weights_only=False)
+    if ckpt.get("model") != name:
+        raise ValueError(f"{path}: expected a {name} checkpoint, found {ckpt.get('model')!r}")
+    missing = [k for k in REQUIRED_KEYS[name] if k not in ckpt]
+    if missing:
+        raise ValueError(f"{path}: missing {missing}")
+    if ckpt["threshold_source"] != "dev_eer":
+        raise ValueError(f"{path}: threshold does not come from dev")
+    return ckpt, sha
 
-    threshold = float(ckpt.get("recall_threshold", RESNET_DEFAULT_THRESHOLD))
-    logger.info(
-        "ResNet18 loaded — epoch=%s, dev EER=%.4f, threshold=%.4f",
-        ckpt.get("epoch"),
-        ckpt.get("eer", float("nan")),
-        threshold,
+
+def load_resnet(path: str, expected_sha256: str | None = None) -> LoadedModel:
+    ckpt, sha = _read_checkpoint(path, "resnet18", expected_sha256)
+    net = resnet18(weights=None)
+    net.fc = FP32Head(nn.BatchNorm1d(512), nn.Dropout(0.3), nn.Linear(512, 1))
+    net.load_state_dict(ckpt["model_state_dict"], strict=True)
+    features = U.LogMelDelta(U.FeatureStats.from_dict(ckpt["feature_stats"]))
+    return LoadedModel(
+        "resnet18",
+        net.to(DEVICE).eval(),
+        float(ckpt["threshold_logit"]),
+        float(ckpt["dev_eer"]),
+        int(ckpt["epoch"]),
+        sha,
+        features.to(DEVICE).eval(),
     )
 
-    return ResNetCheckpoint(
-        model=model,
-        threshold=threshold,
-        mel_mean=float(ckpt["mel_mean"]),
-        mel_std=float(ckpt["mel_std"]),
-        delta_mean=float(ckpt["delta_mean"]),
-        delta_std=float(ckpt["delta_std"]),
-        delta2_mean=float(ckpt["delta2_mean"]),
-        delta2_std=float(ckpt["delta2_std"]),
+
+def load_w2v(path: str, expected_sha256: str | None = None) -> LoadedModel:
+    ckpt, sha = _read_checkpoint(path, "wav2vec2", expected_sha256)
+    cfg = {k: v for k, v in ckpt["encoder_config"].items() if k != "transformers_version"}
+    net = W2VClassifier(Wav2Vec2Model(Wav2Vec2Config(**cfg)))
+    net.load_state_dict(ckpt["model_state_dict"], strict=True)
+    return LoadedModel(
+        "wav2vec2",
+        net.to(DEVICE).eval(),
+        float(ckpt["threshold_logit"]),
+        float(ckpt["dev_eer"]),
+        int(ckpt["epoch"]),
+        sha,
     )
 
 
-def load_w2v(ckpt_path: str = W2V_CKPT) -> W2VCheckpoint:
-    logger.info("Loading Wav2Vec2 checkpoint from %s", ckpt_path)
-    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-
-    model = W2VModel()
-    model.load_state_dict(ckpt["model_state_dict"])
-    model.eval()
-    model.to(DEVICE)
-
-    threshold = float(ckpt.get("eer_threshold", W2V_DEFAULT_THRESHOLD))
-    logger.info(
-        "Wav2Vec2 loaded — epoch=%s, dev EER=%.4f, threshold=%.4f",
-        ckpt.get("epoch"),
-        ckpt.get("eer", float("nan")),
-        threshold,
-    )
-
-    return W2VCheckpoint(model=model, threshold=threshold)
-
-#inference helpers
-def predict_resnet(
-    model: nn.Module,
-    features: torch.Tensor,   
-    threshold: float,
-) -> Dict:
-    x = features.unsqueeze(0).to(DEVICE)   
-    with torch.no_grad():
-        logit = model(x)                 
-        score = torch.sigmoid(logit).item()
-
-    prediction = "AI" if score > threshold else "Human"
-    return {"prediction": prediction, "score": round(score, 4), "threshold": threshold}
+def resnet_input(model: LoadedModel, raw: torch.Tensor) -> torch.Tensor:
+    return model.features(raw.unsqueeze(0).to(DEVICE))
 
 
-def predict_w2v(
-    model: W2VModel,
-    waveform: torch.Tensor,   
-    threshold: float,
-) -> Tuple[Dict, torch.Tensor]:
-    x = waveform.unsqueeze(0).to(DEVICE) 
-    with torch.no_grad():
-        logits, attn = model.forward_with_attention(x)
-        score = torch.sigmoid(logits).item()
+@torch.no_grad()
+def score_resnet(model: LoadedModel, raw: torch.Tensor) -> float:
+    return float(model.net(resnet_input(model, raw)).squeeze())
 
-    prediction = "AI" if score > threshold else "Human"
-    result = {"prediction": prediction, "score": round(score, 4), "threshold": threshold}
-    return result, attn.squeeze(0) 
+
+@torch.no_grad()
+def score_w2v(model: LoadedModel, wave: torch.Tensor) -> tuple[float, torch.Tensor]:
+    logit, attn = model.net(wave.unsqueeze(0).to(DEVICE))
+    return float(logit.squeeze()), attn.squeeze(0).cpu()
+
+
+def calibrated_score(logit: float, threshold_logit: float) -> float:
+    """Logistic of the margin to the dev-EER threshold, so 0.5 is the decision boundary."""
+    z = logit - threshold_logit
+    return 1.0 / (1.0 + math.exp(-z)) if z >= 0 else math.exp(z) / (1.0 + math.exp(z))
+
+
+def label(logit: float, threshold_logit: float) -> str:
+    return "AI" if logit >= threshold_logit else "Human"
+
+
+@dataclass
+class Fusion:
+    mean: tuple[float, float]
+    scale: tuple[float, float]
+    coef: tuple[float, float]
+    intercept: float
+    threshold_logit: float
+
+    @classmethod
+    def from_json(cls, path: str) -> "Fusion":
+        with open(path) as fh:
+            p = json.load(fh)
+        if p.get("inputs") != FUSION_INPUTS or p.get("fitted_on") != "dev":
+            raise ValueError(f"{path}: expected dev-fitted fusion of {FUSION_INPUTS}, found {p.get('inputs')}")
+        return cls(
+            tuple(p["scaler_mean"]),
+            tuple(p["scaler_scale"]),
+            tuple(p["coef"]),
+            float(p["intercept"]),
+            float(p["threshold"]),
+        )
+
+    def logit(self, resnet_logit: float, w2v_logit: float) -> float:
+        z = [(v - m) / s for v, m, s in zip((resnet_logit, w2v_logit), self.mean, self.scale)]
+        return float(self.coef[0] * z[0] + self.coef[1] * z[1] + self.intercept)

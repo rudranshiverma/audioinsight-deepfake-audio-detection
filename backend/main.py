@@ -1,212 +1,184 @@
-import io
 import logging
 import os
-import time
+import threading
 from contextlib import asynccontextmanager
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import Annotated
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
-from huggingface_hub import hf_hub_download
+from config import CHECKPOINTS, DEVICE, FRONTEND_DIR, FUSION_PATH, HF_MODEL_REPO, MAX_UPLOAD_BYTES, MODELS_DIR
 
-from config import DEVICE, MODELS_DIR
+# isort: split
+import audio_utils as U
+
 from inference import (
-    ResNetCheckpoint,
-    W2VCheckpoint,
+    Fusion,
+    LoadedModel,
+    calibrated_score,
+    label,
     load_resnet,
     load_w2v,
-    predict_resnet,
-    predict_w2v,
+    resnet_input,
+    score_resnet,
+    score_w2v,
 )
-from preprocess import load_and_prepare, resnet_features, w2v_features
-from schemas import AnalyzeResponse, AttentionWeights, GradCAMHeatmap
-from xai import compute_attention_weights, compute_gradcam
+from preprocess import prepare
+from schemas import AnalyzeResponse, AttentionWeights, GradCAMHeatmap, ModelResult
+from xai import attention_buckets, gradcam
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(levelname)-8s  %(name)s — %(message)s",
-)
-logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logger = logging.getLogger("audioinsight")
 
 
+@dataclass
+class Models:
+    resnet: LoadedModel
+    w2v: LoadedModel
+    fusion: Fusion
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+
+@dataclass
 class AppState:
-    resnet: Optional[ResNetCheckpoint] = None
-    w2v: Optional[W2VCheckpoint] = None
+    models: Models | None = None
+    error: str | None = None
 
 
-app_state = AppState()
+state = AppState()
+
+
+def load_models(paths: dict[str, str], verify_sha256: bool = True) -> Models:
+    sha = {k: CHECKPOINTS[k]["sha256"] if verify_sha256 else None for k in CHECKPOINTS}
+    return Models(
+        resnet=load_resnet(paths["resnet18"], sha["resnet18"]),
+        w2v=load_w2v(paths["wav2vec2"], sha["wav2vec2"]),
+        fusion=Fusion.from_json(FUSION_PATH),
+    )
+
+
+def download_checkpoints() -> dict[str, str]:
+    from huggingface_hub import hf_hub_download
+
+    os.makedirs(MODELS_DIR, exist_ok=True)
+    return {
+        name: hf_hub_download(repo_id=HF_MODEL_REPO, filename=c["file"], local_dir=MODELS_DIR)
+        for name, c in CHECKPOINTS.items()
+    }
+
+
+def result(logit: float, threshold_logit: float) -> ModelResult:
+    return ModelResult(
+        prediction=label(logit, threshold_logit),
+        score=calibrated_score(logit, threshold_logit),
+        logit=logit,
+        threshold_logit=threshold_logit,
+    )
+
+
+def analyze_audio(models: Models, data: bytes, explain: bool = True) -> AnalyzeResponse:
+    clip = prepare(data)
+    with models.lock:
+        rn_logit = score_resnet(models.resnet, clip.raw)
+        w2v_logit, attn = score_w2v(models.w2v, clip.wave)
+        cam = gradcam(models.resnet.net, resnet_input(models.resnet, clip.raw)) if explain else None
+    rn = result(rn_logit, models.resnet.threshold_logit)
+    w2v = result(w2v_logit, models.w2v.threshold_logit)
+    fused = result(models.fusion.logit(rn_logit, w2v_logit), models.fusion.threshold_logit)
+    attention = None
+    if explain:
+        values, n_frames = attention_buckets(attn)
+        attention = AttentionWeights(values=values, num_frames=n_frames)
+    return AnalyzeResponse(
+        resnet_prediction=rn.prediction,
+        resnet_score=rn.score,
+        w2v_prediction=w2v.prediction,
+        w2v_score=w2v.score,
+        resnet=rn,
+        wav2vec2=w2v,
+        fusion=fused,
+        gradcam=GradCAMHeatmap(values=cam[0], rows=cam[1], cols=cam[2]) if cam else None,
+        attention=attention,
+        duration_seconds=U.MAX_SAMPLES / U.TARGET_SR,
+        audio_seconds=round(clip.seconds, 3),
+        original_sr=clip.original_sr,
+    )
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
-    logger.info("Starting up on device: %s", DEVICE)
-
-    os.makedirs(MODELS_DIR, exist_ok=True)
-
+async def lifespan(_app: FastAPI):
+    logger.info("device: %s", DEVICE)
     try:
-        resnet_local = hf_hub_download(
-            repo_id="rudranshiverma/audio-deepfake-detection-model",
-            filename="resnet18_finetuned.pth",
-            local_dir=MODELS_DIR,
-        )
-
-        w2v_local = hf_hub_download(
-            repo_id="rudranshiverma/audio-deepfake-detection-model",
-            filename="w2v_finetuned.pth",
-            local_dir=MODELS_DIR,
-        )
-
-        app_state.resnet = load_resnet(resnet_local)
-        app_state.w2v = load_w2v(w2v_local)
-
-    except Exception as e:
-        logger.exception("Model download/load failed: %s", e)
-
-    logger.info(
-        "Models ready — ResNet18=%s  Wav2Vec2=%s",
-        "✓" if app_state.resnet else "✗",
-        "✓" if app_state.w2v else "✗",
-    )
-
+        state.models = load_models(download_checkpoints())
+        for m in (state.models.resnet, state.models.w2v):
+            logger.info(
+                "%s: epoch %d, dev EER %.4f%%, threshold %.4f, sha256 %s",
+                m.name,
+                m.epoch,
+                100 * m.dev_eer,
+                m.threshold_logit,
+                m.sha256[:12],
+            )
+    except Exception as exc:
+        state.error = f"{type(exc).__name__}: {exc}"
+        logger.exception("model loading failed")
     yield
-
-    logger.info("Shutting down — releasing model resources")
-    app_state.resnet = None
-    app_state.w2v = None
+    state.models = None
 
 
-app = FastAPI(
-    title="Deepfake Audio Detection API",
-    version="1.0.0",
-    lifespan=lifespan,
-)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_headers=["*"],
-    allow_methods=["*"],
-    allow_credentials=True,
-)
+app = FastAPI(title="AudioInsight API", version="2.0.0", lifespan=lifespan)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 
 @app.get("/health")
 async def health():
+    m = state.models
     return {
-        "status": "ok",
+        "status": "ok" if m else "unavailable",
         "device": str(DEVICE),
-        "resnet_loaded": app_state.resnet is not None,
-        "w2v_loaded": app_state.w2v is not None,
+        "resnet_loaded": m is not None,
+        "w2v_loaded": m is not None,
+        "models": {
+            x.name: {"epoch": x.epoch, "dev_eer": x.dev_eer, "threshold_logit": x.threshold_logit, "sha256": x.sha256}
+            for x in (m.resnet, m.w2v)
+        }
+        if m
+        else None,
+        "error": state.error,
     }
 
 
 @app.post("/analyze", response_model=AnalyzeResponse)
-async def analyze(file: UploadFile = File(...)):
-    if app_state.resnet is None or app_state.w2v is None:
-        raise HTTPException(
-            status_code=503,
-            detail="Models not loaded. Check Hugging Face repo/files and server logs.",
-        )
-
-    audio_bytes = await file.read()
-
-    if len(audio_bytes) == 0:
+async def analyze(file: Annotated[UploadFile, File()]):
+    if state.models is None:
+        raise HTTPException(status_code=503, detail=f"Models not loaded: {state.error or 'starting up'}")
+    data = await file.read(MAX_UPLOAD_BYTES + 1)
+    if not data:
         raise HTTPException(status_code=400, detail="Uploaded file is empty.")
-
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail=f"File larger than {MAX_UPLOAD_BYTES // (1024 * 1024)} MB.")
+    try:
+        response = await run_in_threadpool(analyze_audio, state.models, data)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=f"Could not process audio: {exc}") from exc
     logger.info(
-        "Received file '%s' (%d bytes)",
-        file.filename or "unknown",
-        len(audio_bytes),
+        "%s: resnet %s %.3f, wav2vec2 %s %.3f, fusion %s",
+        file.filename,
+        response.resnet.prediction,
+        response.resnet.logit,
+        response.wav2vec2.prediction,
+        response.wav2vec2.logit,
+        response.fusion.prediction,
     )
-
-    t0 = time.perf_counter()
-
-    try:
-        waveform, original_sr = load_and_prepare(io.BytesIO(audio_bytes))
-    except Exception as exc:
-        raise HTTPException(
-            status_code=422,
-            detail=f"Could not decode audio file: {exc}",
-        ) from exc
-
-    rn_ckpt = app_state.resnet
-
-    mel_tensor = resnet_features(
-        waveform,
-        mel_mean=rn_ckpt.mel_mean,
-        mel_std=rn_ckpt.mel_std,
-        delta_mean=rn_ckpt.delta_mean,
-        delta_std=rn_ckpt.delta_std,
-        delta2_mean=rn_ckpt.delta2_mean,
-        delta2_std=rn_ckpt.delta2_std,
-    )
-
-    resnet_result = predict_resnet(
-        rn_ckpt.model,
-        mel_tensor,
-        rn_ckpt.threshold,
-    )
-
-    try:
-        cam_values, cam_rows, cam_cols = compute_gradcam(
-            rn_ckpt.model,
-            mel_tensor,
-        )
-
-        gradcam_out = GradCAMHeatmap(
-            values=cam_values,
-            rows=cam_rows,
-            cols=cam_cols,
-        )
-    except Exception:
-        gradcam_out = None
-
-    w2v_ckpt = app_state.w2v
-
-    wav_tensor = w2v_features(waveform)
-
-    w2v_result, attn_weights = predict_w2v(
-        w2v_ckpt.model,
-        wav_tensor,
-        w2v_ckpt.threshold,
-    )
-
-    try:
-        attn_values, num_frames = compute_attention_weights(attn_weights)
-
-        attention_out = AttentionWeights(
-            values=attn_values,
-            num_frames=num_frames,
-        )
-    except Exception:
-        attention_out = None
-
-    elapsed = time.perf_counter() - t0
-
-    logger.info("Inference complete in %.2f s", elapsed)
-
-    return AnalyzeResponse(
-        resnet_prediction=resnet_result["prediction"],
-        resnet_score=resnet_result["score"],
-        w2v_prediction=w2v_result["prediction"],
-        w2v_score=w2v_result["score"],
-        gradcam=gradcam_out,
-        attention=attention_out,
-        interpretation=None,
-        duration_seconds=waveform.shape[1] / 16000,
-        original_sr=original_sr,
-    )
+    return response
 
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-FRONTEND_DIR = os.path.join(BASE_DIR, "..", "frontend", "dist")
-ASSETS_DIR = os.path.join(FRONTEND_DIR, "assets")
-
-if os.path.exists(FRONTEND_DIR):
-    app.mount("/assets", StaticFiles(directory=ASSETS_DIR), name="assets")
+if os.path.isdir(FRONTEND_DIR):
+    app.mount("/assets", StaticFiles(directory=os.path.join(FRONTEND_DIR, "assets")), name="assets")
 
     @app.get("/")
     async def serve_frontend():
