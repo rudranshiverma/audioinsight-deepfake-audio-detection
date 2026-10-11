@@ -4,7 +4,7 @@
 > ResNet18 analyses the frequency domain. Wav2Vec2 analyses the temporal domain.  
 > When they disagree, that disagreement is itself a signal.
 
-**[Live Demo](#)** 
+**[Live Demo](https://huggingface.co/spaces/rudranshiverma/audioinsight-deepfake-audio-detection)** 
 
 ---
 
@@ -22,7 +22,7 @@ Both models were evaluated on the ASVspoof 2019 LA eval set (71,933 samples).
 
 | Model | EER ↓ | Recall ↑ | PR-AUC ↑ | Missed Detections ↓ |
 |---|---|---|---|---|
-| ResNet18 | **0.0469** | **0.9501** | 0.9990 | 3,188 |
+| ResNet18 | **0.0455** | **0.9001** | 0.9990 | 6,380 |
 | Wav2Vec2 | **0.0408** | **0.9001** | 0.9983 | 6,385 |
 
 **Training data for both models:** ASVspoof 2019 LA (25,380 samples) + 600 modern TTS samples (ElevenLabs, Respeecher) + 1,000 LibriSpeech samples + noise augmentation.
@@ -303,5 +303,5 @@ Upload an audio file and receive predictions from both models.
 
 ## Author
 
-Built by **Rudransh Verma**. 
+Built by **Rudranshi Verma**. 
 [LinkedIn](https://www.linkedin.com/in/rudranshi-verma/)
