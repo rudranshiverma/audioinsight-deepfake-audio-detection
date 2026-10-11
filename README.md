@@ -3,8 +3,8 @@
 Two complementary detectors for synthetic speech, a spectrogram CNN and a self-supervised speech transformer, evaluated on the ASVspoof 2019 Logical Access benchmark and served through an interpretable web app.
 
 [![Live Demo](https://img.shields.io/badge/Live%20Demo-Hugging%20Face%20Spaces-ffcc4d?logo=huggingface&logoColor=black)](https://huggingface.co/spaces/rudranshiverma/audioinsight-deepfake-audio-detection)
-![Python](https://img.shields.io/badge/Python-3776ab?logo=python&logoColor=white)
-![PyTorch](https://img.shields.io/badge/PyTorch-ee4c2c?logo=pytorch&logoColor=white)
+![Python](https://img.shields.io/badge/Python-ML%20pipeline-3776ab?logo=python&logoColor=white)
+![PyTorch](https://img.shields.io/badge/PyTorch-models-ee4c2c?logo=pytorch&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-backend-009688?logo=fastapi&logoColor=white)
 ![React](https://img.shields.io/badge/React-frontend-61dafb?logo=react&logoColor=black)
 
@@ -77,16 +77,19 @@ wav2vec 2.0 stays below 3% EER on every attack, and its hardest attack is A10 (2
 
 The models disagree on 17.8% of eval trials, and in those cases wav2vec 2.0 is right about 9 times out of 10. When they agree, both are wrong on only 2.98% of trials.
 
-<details>
-<summary><b>Score distributions and confusion matrices</b></summary>
-<br>
+### Score distributions
+
+wav2vec 2.0 separates the two classes with almost no overlap. ResNet18's bona fide scores spread widely and overlap the spoof peak near its threshold.
+
 <p align="center">
   <img src="results/figures/score_distributions.png" width="900" alt="Score distributions on eval">
 </p>
+
+### Confusion matrices
+
 <p align="center">
   <img src="results/figures/confusion_matrices.png" width="900" alt="Confusion matrices on eval">
 </p>
-</details>
 
 ## How It Works
 
