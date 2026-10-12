@@ -1,29 +1,34 @@
-#config.py: numbers derived directly from training
 import os
+import sys
+
 import torch
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(BASE_DIR)
+SRC_DIR = os.path.join(REPO_ROOT, "src")
+if SRC_DIR not in sys.path:
+    sys.path.insert(0, SRC_DIR)
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-TARGET_SR: int = 16_000           
-MAX_SAMPLES: int = TARGET_SR * 4  
-#mel-spectrogram constants
-N_FFT: int = 1024
-HOP_LENGTH: int = 256
-N_MELS: int = 128
-
-#model checkpoint paths
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODELS_DIR = os.path.join(BASE_DIR, "models")
-RESNET_CKPT = os.path.join(MODELS_DIR, "resnet18_finetuned.pth")
-W2V_CKPT= os.path.join(MODELS_DIR, "w2v_finetuned.pth")
+FUSION_PATH = os.path.join(REPO_ROOT, "results", "fusion.json")
+FRONTEND_DIR = os.path.join(REPO_ROOT, "frontend", "dist")
 
-WAV2VEC2_BASE = "facebook/wav2vec2-base"
+HF_MODEL_REPO = "rudranshiverma/audio-deepfake-detection-model"
+CHECKPOINTS = {
+    "resnet18": {
+        "file": "resnet18_seed0.pt",
+        "sha256": "89beeb29853d571f0e5ab973b914661f8bc8deb7aaa2c481a7f95ae8897c8ffe",
+    },
+    "wav2vec2": {
+        "file": "wav2vec2_seed0.pt",
+        "sha256": "58dd55996a0c759c8eb97b64bd0f6ef35b2e41090d97fafdcca9521374576212",
+    },
+}
+FUSION_INPUTS = ["resnet18_seed0", "wav2vec2_seed0"]
 
-#inference thresholds for fallback
-RESNET_DEFAULT_THRESHOLD: float = 0.5
-W2V_DEFAULT_THRESHOLD: float= 0.5
-
-#gradcam target layer
-GRADCAM_TARGET_LAYER = "layer4"
-
-ATTENTION_BUCKETS: int = 34
+MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+MIN_SECONDS = 0.1
+GRADCAM_LAYER = "layer4"
+ATTENTION_BUCKETS = 34

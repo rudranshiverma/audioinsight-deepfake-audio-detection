@@ -1,41 +1,39 @@
-#schemas.py
-from typing import List, Optional
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
+
 class ModelResult(BaseModel):
-    prediction: str = Field(..., description="'AI' or 'Human'")
-    score: float= Field(..., ge=0.0, le=1.0, description="P(AI) after sigmoid")
-    threshold: float = Field(..., description="Decision threshold used")
+    prediction: Literal["AI", "Human"]
+    score: float = Field(
+        ..., ge=0.0, le=1.0, description="sigmoid(logit - threshold_logit); 0.5 is the decision boundary"
+    )
+    logit: float = Field(..., description="Spoof logit")
+    threshold_logit: float = Field(..., description="Dev-EER threshold on the logit")
+
 
 class GradCAMHeatmap(BaseModel):
-    #flattened 2-D GradCAM activation map returned as a flat list of floats in row-major order plus the original shape so the frontend can reconstruct or resize as needed.
-    values: List[float]
-    rows: int   #frequency axis
-    cols: int   #time axis
+    values: list[float]
+    rows: int
+    cols: int
 
 
 class AttentionWeights(BaseModel):
-    values: List[float]   
-    num_frames: int      
+    values: list[float]
+    num_frames: int
+
 
 class AnalyzeResponse(BaseModel):
-    #predictions
-    resnet_prediction: str  = Field(..., description="'AI' or 'Human'")
-    resnet_score: float     = Field(..., ge=0.0, le=1.0)
-    w2v_prediction: str     = Field(..., description="'AI' or 'Human'")
-    w2v_score: float        = Field(..., ge=0.0, le=1.0)
-
-    #xai outputs
-    gradcam: Optional[GradCAMHeatmap]       = None
-    attention: Optional[AttentionWeights]   = None
-
-    #interpretation
-    interpretation: Optional[str] = None
-
-    #audio metadata
-    duration_seconds: float = Field(..., description="Clipped/padded duration fed to models")
-    original_sr: int        = Field(..., description="Sample rate of the uploaded file")
-
-
-class ErrorResponse(BaseModel):
-    detail: str
+    resnet_prediction: Literal["AI", "Human"]
+    resnet_score: float = Field(..., ge=0.0, le=1.0)
+    w2v_prediction: Literal["AI", "Human"]
+    w2v_score: float = Field(..., ge=0.0, le=1.0)
+    resnet: ModelResult
+    wav2vec2: ModelResult
+    fusion: ModelResult
+    gradcam: GradCAMHeatmap | None = None
+    attention: AttentionWeights | None = None
+    interpretation: str | None = None
+    duration_seconds: float = Field(..., description="Length of the window the models analyse")
+    audio_seconds: float = Field(..., description="Length of the uploaded audio")
+    original_sr: int

@@ -1,135 +1,79 @@
-#preprocess.py: audio loading and feature extraction, supports WAV / MP3 / FLAC / M4A reliably on Windows.
-'''Pipelines:
-1. resnet_features(...)-> 3-channel tensor [3, 128, T]
-   Mel + Delta + Delta2
-2. w2v_features(...)
-   -> raw waveform [64000]'''
-
 import io
-from typing import Tuple, Union
-import librosa
+import os
+import subprocess
+import tempfile
+from dataclasses import dataclass
+
+import numpy as np
+import soundfile as sf
 import torch
 import torchaudio
-import torchaudio.transforms as T
 
-from config import (
-    TARGET_SR,
-    MAX_SAMPLES,
-    N_FFT,
-    HOP_LENGTH,
-    N_MELS,
-)
+from config import MIN_SECONDS
 
-#global transforms
-mel_tf = T.MelSpectrogram(
-    sample_rate=TARGET_SR,
-    n_fft=N_FFT,
-    hop_length=HOP_LENGTH,
-    n_mels=N_MELS,
-)
-a2db = T.AmplitudeToDB()
+# isort: split
+import audio_utils as U
 
-#audio loader
-def _load_waveform(
-    source: Union[str, bytes, io.BytesIO]
-) -> Tuple[torch.Tensor, int]:
-    #prioritize torchaudio and librosa is fallback
-    #returns waveform [1, N], sample_rate
 
-    if isinstance(source, bytes):
-        source = io.BytesIO(source)
+@dataclass
+class Clip:
+    raw: torch.Tensor
+    wave: torch.Tensor
+    original_sr: int
+    seconds: float
 
-    #torchaudio
+
+def _decode_ffmpeg(data: bytes):
+    with tempfile.TemporaryDirectory() as tmp:
+        src, dst = os.path.join(tmp, "in"), os.path.join(tmp, "out.wav")
+        with open(src, "wb") as fh:
+            fh.write(data)
+        try:
+            subprocess.run(
+                ["ffmpeg", "-nostdin", "-v", "error", "-i", src, "-vn", "-c:a", "pcm_f32le", dst],
+                check=True,
+                capture_output=True,
+                timeout=60,
+            )
+        except FileNotFoundError as exc:
+            raise ValueError("format not supported without ffmpeg; upload WAV, FLAC, OGG or MP3") from exc
+        except subprocess.CalledProcessError as exc:
+            raise ValueError("unsupported or corrupted audio file") from exc
+        return sf.read(dst, dtype="float32", always_2d=True)
+
+
+def decode(data: bytes):
+    """Any common audio format -> float32 mono at its native sample rate."""
     try:
-        waveform, sr = torchaudio.load(source)
-        # stereo -> mono
-        if waveform.shape[0] > 1:
-            waveform = waveform.mean(dim=0, keepdim=True)
-        return waveform, sr
-    except Exception as e:
-        torchaudio_error = str(e)
+        x, sr = sf.read(io.BytesIO(data), dtype="float32", always_2d=True)
+    except sf.LibsndfileError:
+        x, sr = _decode_ffmpeg(data)
+    if x.size == 0:
+        raise ValueError("no audio samples found")
+    return x.mean(axis=1), int(sr)
 
-    #fallback librosa
-    try:
-        if isinstance(source, io.BytesIO):
-            source.seek(0)
-        y, sr = librosa.load(source, sr=None, mono=True)
 
-        waveform = torch.tensor(
-            y,dtype=torch.float32).unsqueeze(0)
-        return waveform, sr
+def to_training_grid(x: np.ndarray, sr: int) -> np.ndarray:
+    """16 kHz on the int16 grid, the representation every training clip had."""
+    if sr != U.TARGET_SR:
+        x = torchaudio.functional.resample(torch.from_numpy(np.ascontiguousarray(x)), sr, U.TARGET_SR).numpy()
+    q = np.clip(np.round(x.astype(np.float64) * 32768.0), -32768, 32767).astype(np.int16)
+    return U.int16_to_float32(q)
 
-    except Exception as e:
-        raise RuntimeError(f"Could not decode audio file: {str(e)}")
 
-#resample
-def _resample(
-    waveform: torch.Tensor,
-    src_sr: int
-) -> torch.Tensor:
+def normalise_wave(x: np.ndarray) -> np.ndarray:
+    return (x - x.mean()) / np.sqrt(x.var() + 1e-7)
 
-    if src_sr != TARGET_SR:
-        waveform = T.Resample(src_sr, TARGET_SR)(waveform)
 
-    return waveform
-
-#length=4sec
-def _fit_length(
-    waveform: torch.Tensor
-) -> torch.Tensor:
-    #pad/trim to max_samples
-    n = waveform.shape[1]
-    if n > MAX_SAMPLES:
-        waveform = waveform[:, :MAX_SAMPLES]
-    elif n < MAX_SAMPLES:
-        waveform = torch.nn.functional.pad(
-            waveform,
-            (0, MAX_SAMPLES - n)
-        )
-
-    return waveform
-
-#loader
-def load_and_prepare(
-    source: Union[str, bytes, io.BytesIO]
-) -> Tuple[torch.Tensor, int]:
-    #returns:waveform [1, 64000], original_sr
-
-    waveform, original_sr = _load_waveform(source)
-    waveform = _resample(waveform, original_sr)
-    waveform = _fit_length(waveform)
-    return waveform, original_sr
-
-#resnet features
-def resnet_features(
-    waveform: torch.Tensor,
-    mel_mean: float,
-    mel_std: float,
-    delta_mean: float,
-    delta_std: float,
-    delta2_mean: float,
-    delta2_std: float,
-) -> torch.Tensor:
-
-    mel = mel_tf(waveform)
-    mel = a2db(mel)
-
-    delta = torchaudio.functional.compute_deltas(mel)
-    delta2 = torchaudio.functional.compute_deltas(delta)
-
-    mel = (mel - mel_mean) / (mel_std + 1e-6)
-    delta = (delta - delta_mean) / (delta_std + 1e-6)
-    delta2 = (delta2 - delta2_mean) / (delta2_std + 1e-6)
-
-    features = torch.cat(
-        [mel, delta, delta2],
-        dim=0
-    )  # [3,128,T]
-
-    return features.float()
-
-#w2v features
-def w2v_features(
-    waveform: torch.Tensor
-) -> torch.Tensor:
-    return waveform.squeeze(0).float()
+def prepare(data: bytes) -> Clip:
+    x, sr = decode(data)
+    x = to_training_grid(x, sr)
+    if x.size < MIN_SECONDS * U.TARGET_SR:
+        raise ValueError(f"clip shorter than {MIN_SECONDS} s")
+    head = x[: U.MAX_SAMPLES]
+    return Clip(
+        raw=U.fit_head(torch.from_numpy(head)),
+        wave=U.fit_head(torch.from_numpy(normalise_wave(head))),
+        original_sr=sr,
+        seconds=x.size / U.TARGET_SR,
+    )
