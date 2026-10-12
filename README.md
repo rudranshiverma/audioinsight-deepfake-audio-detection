@@ -160,6 +160,7 @@ Built-in safeguards:
 - **Before training:** each training notebook confirms its model can fit a small fixed batch before the full run.
 - **After training:** every checkpoint is reloaded and must reproduce its recorded dev EER.
 - **Before reporting:** notebook 03 re-scores dev from the original audio, and every EER is cross-checked against an independent implementation.
+- **Before serving:** the backend reproduces notebook 03's scores on 280 eval clips with no changed decisions (`backend/tests/parity_check.py`).
 
 The per-utterance scores in `results/scores/` are enough to recompute every number above without a GPU.
 
@@ -185,6 +186,7 @@ audioinsight/
 │   ├── figures/
 │   └── scores/               # Per-utterance dev and eval scores
 ├── backend/                  # FastAPI inference service
+│   └── tests/                # Parity check and codec robustness probe
 ├── frontend/                 # React + TypeScript interface
 ├── screenshots/
 └── THIRD_PARTY_LICENSES.md
@@ -192,28 +194,29 @@ audioinsight/
 
 ## Running Locally
 
-**Prerequisites:** Python 3.10+, Node.js 18+.
+**Prerequisites:** Python 3.10–3.13, Node.js 18+.
 
 ### Backend
 
 ```bash
 cd backend
-pip install -r requirements.txt
-uvicorn main:app --reload --host 0.0.0.0 --port 8000
+python -m venv venv
+source venv/bin/activate          # Windows: venv\Scripts\activate
+python -m pip install -r requirements.txt
+python -m uvicorn main:app --port 8000
 ```
 
-Model checkpoints are downloaded from Hugging Face on first startup into `backend/models/`. Open `http://localhost:8000/health` to confirm both models loaded.
+Model checkpoints are downloaded from Hugging Face on first startup. Supported formats: WAV, FLAC, OGG and MP3 at any sample rate; other formats such as M4A need `ffmpeg`.
 
 ### Frontend
 
 ```bash
 cd frontend
 npm install
-echo "VITE_API_URL=http://localhost:8000" > .env.local
 npm run dev
 ```
 
-Supported formats are WAV, MP3, FLAC, OGG and M4A, at any sample rate, mono or stereo.
+The dev server forwards `/analyze` to the backend on port 8000. To use another backend, set `VITE_API_URL` in `frontend/.env.local`.
 
 ## API
 
@@ -221,24 +224,73 @@ Supported formats are WAV, MP3, FLAC, OGG and M4A, at any sample rate, mono or s
 
 Request: `multipart/form-data` with an audio file in the field `file`.
 
+Response for ASVspoof 2019 LA eval clip `LA_E_2834763` (attack A11) from the live demo, with the Grad-CAM and attention arrays omitted:
+
 ```json
 {
   "resnet_prediction": "AI",
-  "resnet_score": 0.9823,
-  "w2v_prediction": "Human",
-  "w2v_score": 0.1204,
-  "gradcam": { "values": [], "rows": 128, "cols": 250 },
+  "resnet_score": 0.6722199182540346,
+  "w2v_prediction": "AI",
+  "w2v_score": 0.9996241476172029,
+  "resnet": {
+    "prediction": "AI",
+    "score": 0.6722199182540346,
+    "logit": 3.1561405658721924,
+    "threshold_logit": 2.4378979206085205
+  },
+  "wav2vec2": {
+    "prediction": "AI",
+    "score": 0.9996241476172029,
+    "logit": 12.167206764221191,
+    "threshold_logit": 4.28126859664917
+  },
+  "fusion": {
+    "prediction": "AI",
+    "score": 0.9967988791259038,
+    "logit": 6.492273353418797,
+    "threshold_logit": 0.7512253514880456
+  },
+  "gradcam": { "values": [], "rows": 128, "cols": 251 },
   "attention": { "values": [], "num_frames": 199 },
   "interpretation": null,
   "duration_seconds": 4.0,
-  "original_sr": 44100
+  "audio_seconds": 1.427,
+  "original_sr": 16000
 }
 ```
+
+| Field | Meaning |
+|---|---|
+| `resnet`, `wav2vec2`, `fusion` | Prediction, spoof logit and the dev-EER threshold for each system. `score` is `sigmoid(logit − threshold_logit)`: 0.5 at the decision threshold, so it shows how far a clip sits from the boundary. It is not a calibrated probability. |
+| `resnet_prediction`, `resnet_score`, `w2v_prediction`, `w2v_score` | The same values as `resnet` and `wav2vec2`, in the original flat format |
+| `gradcam` | Grad-CAM map over the 128 × 251 spectrogram, scaled to [0, 1] |
+| `attention` | wav2vec 2.0 frame attention resampled to 34 values, scaled to [0, 1] |
+| `duration_seconds`, `audio_seconds` | Length of the analysed window and of the uploaded audio |
 
 ### `GET /health`
 
 ```json
-{ "status": "ok", "device": "cuda", "resnet_loaded": true, "w2v_loaded": true }
+{
+  "status": "ok",
+  "device": "cpu",
+  "resnet_loaded": true,
+  "w2v_loaded": true,
+  "models": {
+    "resnet18": {
+      "epoch": 7,
+      "dev_eer": 0.02560494057687661,
+      "threshold_logit": 2.4378979206085205,
+      "sha256": "89beeb29853d571f0e5ab973b914661f8bc8deb7aaa2c481a7f95ae8897c8ffe"
+    },
+    "wav2vec2": {
+      "epoch": 6,
+      "dev_eer": 0.001171761244035579,
+      "threshold_logit": 4.28126859664917,
+      "sha256": "58dd55996a0c759c8eb97b64bd0f6ef35b2e41090d97fafdcca9521374576212"
+    }
+  },
+  "error": null
+}
 ```
 
 ## Limitations
@@ -247,6 +299,7 @@ Request: `multipart/form-data` with an audio file in the field `file`.
 - **Generators:** the training attacks are 2019-era TTS and voice conversion systems. Current commercial voice cloning is not represented.
 - **Clip length:** only the first 4 seconds of a clip are analysed.
 - **Threshold shift:** thresholds set on dev transfer imperfectly to unseen attacks. wav2vec 2.0 misses 0.12% of spoofs on dev and 4.54% on eval at the same threshold, so a deployment would need calibration on data that resembles its own traffic.
+- **Real-world audio:** on compressed recordings from outside ASVspoof, wav2vec 2.0 flagged some genuine speech as spoofed and ResNet18 missed current TTS. In `codec_probe.py`, lossless resampling leaves decisions unchanged and MP3 compression does not reproduce wav2vec 2.0's false alarms, which points to recording conditions rather than file format; MP3 does shift ResNet18's scores towards spoof. These observations come from a small number of clips and are not a benchmark result.
 
 ## Metrics
 
