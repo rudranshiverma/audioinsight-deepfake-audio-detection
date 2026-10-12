@@ -30,3 +30,4 @@ __pycache__/
 *.pyc
 .env
 screenshots/*.mp4
+desktop.ini
