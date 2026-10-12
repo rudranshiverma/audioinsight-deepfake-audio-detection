@@ -8,7 +8,6 @@ from typing import Annotated
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from config import CHECKPOINTS, DEVICE, FRONTEND_DIR, FUSION_PATH, HF_MODEL_REPO, MAX_UPLOAD_BYTES, MODELS_DIR
@@ -178,8 +177,4 @@ async def analyze(file: Annotated[UploadFile, File()]):
 
 
 if os.path.isdir(FRONTEND_DIR):
-    app.mount("/assets", StaticFiles(directory=os.path.join(FRONTEND_DIR, "assets")), name="assets")
-
-    @app.get("/")
-    async def serve_frontend():
-        return FileResponse(os.path.join(FRONTEND_DIR, "index.html"))
+    app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
